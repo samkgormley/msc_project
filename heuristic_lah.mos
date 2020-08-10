@@ -1,0 +1,731 @@
+model "Dail Eireann Model"
+  uses "mmxprs", "mmsystem"
+
+! ============================================================================
+! Initialise Functions Defined Later
+! ============================================================================
+
+  forward function random_gov(a: integer): integer
+  forward function random_non_gov(a: integer): integer
+  forward function left_seat_calc(a: integer): integer
+  forward function right_seat_calc(a: integer): integer
+
+! ============================================================================
+! Set Parameters and Datafile
+! ============================================================================
+
+  desired_iterations := 100
+
+  !filename := "dail_49.dat"
+  !filename := "dail_84.dat"
+  !filename := "dail_123.dat"
+  !filename := "dail_219.dat"
+  !filename := "dail_274.dat"
+  !filename := "dail_335.dat"
+  !filename := "dail_402.dat"
+
+  !filename := "33_dail.dat"
+  !filename := "32_dail.dat"
+  !filename := "31_dail.dat"
+  !filename := "30_dail.dat"
+  !filename := "29_dail.dat"
+  !filename := "28_dail.dat"
+
+! ============================================================================
+! Read Data
+! ============================================================================
+
+  ! Data for Set Creation
+  declarations
+    number_of_parliament_seats: integer
+  end-declarations
+
+  initialisations from filename
+    number_of_parliament_seats
+  end-initialisations
+
+  ! Fixed Data
+  declarations
+    Seats = 1..number_of_parliament_seats
+    Parties: set of string
+    number_of_members_per_party: array(Parties) of integer
+    column: array(Seats) of integer
+    row: array(Seats) of integer
+    gov_party: array(Parties) of integer
+    taoiseach_party: array(Parties) of integer
+    loto_party: array(Parties) of integer
+    number_of_ministries: array(Parties) of integer
+    seat_distances: array(Seats, Seats) of real
+    comm_flows: array(Seats, Seats) of real
+    number_of_independents: integer
+  end-declarations
+
+  initialisations from filename
+    Parties
+    number_of_members_per_party
+    column
+    row
+    gov_party
+    taoiseach_party
+    loto_party
+    number_of_ministries
+    seat_distances
+    comm_flows
+    number_of_independents
+  end-initialisations
+
+  ! Define opp_party values
+  forall(j in Parties | j <> "Unaligned Independents") opp_party(j) := 1 - gov_party(j)
+
+  ! Decision Variables
+  declarations
+    ! 'Party Seat?' binary variable for each seat for each party
+    z: array(Seats, Parties) of mpvar
+  end-declarations
+
+! ============================================================================
+! Modelling
+! ============================================================================
+
+  ! Capture System Time
+  time_one := time(SYS_NOW)
+
+  ! ----------------------------------------------------------------------------
+  ! Outer while loop for number of prescribed iterations
+  ! ----------------------------------------------------------------------------
+
+  current_iteration := 0
+  best_score := 100000.00
+  ineligible_solutions := 0
+
+
+  while (current_iteration < desired_iterations) do
+
+    current_iteration += 1
+
+    ! ----------------------------------------------------------------------------
+    ! Set the rules for the random selection of starting centres
+    ! ----------------------------------------------------------------------------
+
+    forall(j in Parties | taoiseach_party(j) >= 1) incumbent_centres(j) := 21
+    forall(j in Parties | loto_party(j) >= 1) incumbent_centres(j) := 46
+    forall(j in Parties | taoiseach_party(j) <= 0 and gov_party(j) >= 1) incumbent_centres(j) := random_gov(round((random * left_seat_calc(number_of_parliament_seats)) + 0.5))
+    forall(j in Parties | loto_party(j) <= 0 and gov_party(j) <= 0) incumbent_centres(j) := random_non_gov(round((random * right_seat_calc(number_of_parliament_seats)) + 0.5))
+
+
+    ! Write Output
+    write(current_iteration,": ")
+    forall(j in Parties) write(incumbent_centres(j), " ")
+    writeln
+
+    ! ----------------------------------------------------------------------------
+    ! Inner while loop to run Location-Allocation iteratively until convergence of centres
+    ! ----------------------------------------------------------------------------
+
+    forall(j in Parties) current_centres(j) := 0
+
+    while(incumbent_centres <> current_centres) do
+    
+      forall(j in Parties) current_centres(j) := incumbent_centres(j)
+
+      ! ----------------------------------------------------------------------------
+      ! Solve Allocation Problem
+      ! ----------------------------------------------------------------------------
+
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      ! Objective Function
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      total_score := sum(i in Seats, j in Parties) seat_distances(i,current_centres(j)) * z(i,j)
+
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      ! Model Constraints
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! 1. Each seat must be allocated to at most 1 party.
+      forall(i in Seats) sum(j in Parties) z(i,j) <= 1
+
+      ! 2. Each party must be allocated exactly the required number of seats for its members.
+      forall(j in Parties) sum(i in Seats) z(i,j) = number_of_members_per_party(j)
+
+      ! 3. The z variable is binary.
+      forall(i in Seats, j in Parties) z(i,j) is_binary
+
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      ! Dail-specific Constraints
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      ! 4. TAOI: The Taoiseach's seat must be assigned to largest government party
+      forall(i in Seats | i = 21, j in Parties | taoiseach_party(j) >= 1) z(i,j) = 1
+      ! 5. LOTO: The LOTO's seat must be assigned to largest non-government party
+      forall(i in Seats | i = 46, j in Parties | loto_party(j) >= 1) z(i,j) = 1
+
+      ! 6. MIN: Each party must have at least as many seats in the front 2 rows as it has government ministers.
+      forall(j in Parties) sum(i in Seats | row(i) <= 2) z(i,j) >= number_of_ministries(j)
+
+      ! 7. IND: There must be at least as many seats to the right side of the chamber as there are independent members.
+      sum(i in Seats | column(i) >= 23 and row(i) >= 4) (1 - sum(j in Parties) z(i,j)) >= number_of_independents
+
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      ! Optimize
+      ! ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+      minimise(total_score)
+
+      ! ----------------------------------------------------------------------------
+      ! Solve Location Problem
+      ! ----------------------------------------------------------------------------
+
+      forall(i in Seats, j in Parties) incumbent_seats(i,j) := getsol(z(i,j))
+
+      forall(j in Parties) do
+        min_centre_distance := 10000.00
+        forall(k in Seats) do
+          if sum(i in Seats) seat_distances(i,k) * incumbent_seats(i,j) < min_centre_distance then
+            min_centre_distance := sum(i in Seats) seat_distances(i,k) * incumbent_seats(i,j)
+            updated_centre := k
+          end-if
+        end-do
+        incumbent_centres(j) := updated_centre
+      end-do
+
+      ! Write Output
+      write(current_iteration,": ")
+      forall(j in Parties) write(incumbent_centres(j)," ")
+      writeln
+
+    end-do
+
+    ! ----------------------------------------------------------------------------
+    ! Determine if the incumbent solution is eligible under removed constraint
+    ! ----------------------------------------------------------------------------
+
+    ineligible_centre_pairings := 0
+    forall(a in Parties | gov_party(a) >= 1, b in Parties | opp_party(b) >= 1) do
+      if column(incumbent_centres(a)) > column(incumbent_centres(b)) then
+        ineligible_centre_pairings += 1
+      end-if
+    end-do
+
+    if ineligible_centre_pairings >= 1 then
+      ineligible_solutions += 1
+    end-if
+
+    ! ----------------------------------------------------------------------------
+    ! Calculate scoring metrics
+    ! ----------------------------------------------------------------------------
+
+    incumbent_score := sum(i in Seats, j in Parties) seat_distances(i,incumbent_centres(j)) * incumbent_seats(i,j)
+    
+    ! Write Output
+    writeln(incumbent_score)
+
+    ! ----------------------------------------------------------------------------
+    ! Update best solution if better than incumbent
+    ! ----------------------------------------------------------------------------
+
+    if (incumbent_score < best_score) and (ineligible_centre_pairings <= 0) then
+      best_score := incumbent_score
+      forall(i in Seats, j in Parties) best_seats(i,j) := incumbent_seats(i,j)
+      forall(j in Parties) best_centres(j) := incumbent_centres(j)
+    end-if
+
+  end-do
+
+  ! ----------------------------------------------------------------------------
+  ! Post-Op: Add Independents
+  ! ----------------------------------------------------------------------------
+
+  n := 1
+  while(n <= number_of_independents) do
+    n += 1
+    max_seat := 1
+    forall(i in Seats | sum(j in Parties) best_seats(i,j) = 0 and column(i) >= 23) do
+      if i > max_seat then
+        max_seat := i
+      end-if
+    end-do
+    if max_seat <> 1 then
+      best_seats(max_seat,"Unaligned Independents") := 1
+    end-if
+  end-do
+
+! ----------------------------------------------------------------------------
+! Calculate output and results
+! ----------------------------------------------------------------------------
+
+  ! Capture System Time
+  time_two := time(SYS_NOW)
+
+! ============================================================================
+! Print/Save the results
+! ============================================================================
+
+  procedure print_solution
+
+    !fopen(("Results_PC"), F_OUTPUT)
+
+    writeln
+
+    writeln("Number of eligible solutions: ", desired_iterations - ineligible_solutions)
+
+    writeln
+
+    writeln("Total distance to centres: ", best_score)
+
+    writeln
+
+    writeln("Time taken for model: ", time_two - time_one, "ms")
+
+    writeln
+
+    !fclose(F_OUTPUT)
+
+  end-procedure
+
+  print_solution
+
+! ============================================================================
+! Functions for generating random seats for nuanced random input
+! ============================================================================
+
+  function random_gov(a: integer): integer
+    if a <= 10 then b := a
+    elif a = 11 then b := 21
+    elif a = 12 then b := 22
+    elif a = 13 then b := 23
+    elif a = 14 then b := 24
+    elif a = 15 then b := 25
+    elif a = 16 then b := 26
+    elif a = 17 then b := 27
+    elif a = 18 then b := 28
+    elif a = 19 then b := 29
+    elif a = 20 then b := 30
+    elif a = 21 then b := 31
+    elif a = 22 then b := 32
+    elif a = 23 then b := 33
+    elif a = 24 then b := 50
+    elif a = 25 then b := 51
+    elif a = 26 then b := 52
+    elif a = 27 then b := 53
+    elif a = 28 then b := 54
+    elif a = 29 then b := 55
+    elif a = 30 then b := 56
+    elif a = 31 then b := 57
+    elif a = 32 then b := 58
+    elif a = 33 then b := 59
+    elif a = 34 then b := 60
+    elif a = 35 then b := 61
+    elif a = 36 then b := 62
+    elif a = 37 then b := 63
+    elif a = 38 then b := 64
+    elif a = 39 then b := 65
+    elif a = 40 then b := 85
+    elif a = 41 then b := 86
+    elif a = 42 then b := 87
+    elif a = 43 then b := 88
+    elif a = 44 then b := 89
+    elif a = 45 then b := 90
+    elif a = 46 then b := 91
+    elif a = 47 then b := 92
+    elif a = 48 then b := 93
+    elif a = 49 then b := 94
+    elif a = 50 then b := 95
+    elif a = 51 then b := 96
+    elif a = 52 then b := 97
+    elif a = 53 then b := 98
+    elif a = 54 then b := 99
+    elif a = 55 then b := 100
+    elif a = 56 then b := 101
+    elif a = 57 then b := 102
+    elif a = 58 then b := 124
+    elif a = 59 then b := 125
+    elif a = 60 then b := 126
+    elif a = 61 then b := 127
+    elif a = 62 then b := 128
+    elif a = 63 then b := 129
+    elif a = 64 then b := 130
+    elif a = 65 then b := 131
+    elif a = 66 then b := 132
+    elif a = 67 then b := 133
+    elif a = 68 then b := 134
+    elif a = 69 then b := 135
+    elif a = 70 then b := 136
+    elif a = 71 then b := 137
+    elif a = 72 then b := 138
+    elif a = 73 then b := 139
+    elif a = 74 then b := 140
+    elif a = 75 then b := 141
+    elif a = 76 then b := 142
+    elif a = 77 then b := 143
+    elif a = 78 then b := 144
+    elif a = 79 then b := 169
+    elif a = 80 then b := 170
+    elif a = 81 then b := 171
+    elif a = 82 then b := 172
+    elif a = 83 then b := 173
+    elif a = 84 then b := 174
+    elif a = 85 then b := 175
+    elif a = 86 then b := 176
+    elif a = 87 then b := 177
+    elif a = 88 then b := 178
+    elif a = 89 then b := 179
+    elif a = 90 then b := 180
+    elif a = 91 then b := 181
+    elif a = 92 then b := 182
+    elif a = 93 then b := 183
+    elif a = 94 then b := 184
+    elif a = 95 then b := 185
+    elif a = 96 then b := 186
+    elif a = 97 then b := 187
+    elif a = 98 then b := 188
+    elif a = 99 then b := 189
+    elif a = 100 then b := 190
+    elif a = 101 then b := 191
+    elif a = 102 then b := 192
+    elif a = 103 then b := 220
+    elif a = 104 then b := 221
+    elif a = 105 then b := 222
+    elif a = 106 then b := 223
+    elif a = 107 then b := 224
+    elif a = 108 then b := 225
+    elif a = 109 then b := 226
+    elif a = 110 then b := 227
+    elif a = 111 then b := 228
+    elif a = 112 then b := 229
+    elif a = 113 then b := 230
+    elif a = 114 then b := 231
+    elif a = 115 then b := 232
+    elif a = 116 then b := 233
+    elif a = 117 then b := 234
+    elif a = 118 then b := 235
+    elif a = 119 then b := 236
+    elif a = 120 then b := 237
+    elif a = 121 then b := 238
+    elif a = 122 then b := 239
+    elif a = 123 then b := 240
+    elif a = 124 then b := 241
+    elif a = 125 then b := 242
+    elif a = 126 then b := 243
+    elif a = 127 then b := 244
+    elif a = 128 then b := 245
+    elif a = 129 then b := 275
+    elif a = 130 then b := 276
+    elif a = 131 then b := 277
+    elif a = 132 then b := 278
+    elif a = 133 then b := 279
+    elif a = 134 then b := 280
+    elif a = 135 then b := 281
+    elif a = 136 then b := 282
+    elif a = 137 then b := 283
+    elif a = 138 then b := 284
+    elif a = 139 then b := 285
+    elif a = 140 then b := 286
+    elif a = 141 then b := 287
+    elif a = 142 then b := 288
+    elif a = 143 then b := 289
+    elif a = 144 then b := 290
+    elif a = 145 then b := 291
+    elif a = 146 then b := 292
+    elif a = 147 then b := 293
+    elif a = 148 then b := 294
+    elif a = 149 then b := 295
+    elif a = 150 then b := 296
+    elif a = 151 then b := 297
+    elif a = 152 then b := 298
+    elif a = 153 then b := 299
+    elif a = 154 then b := 300
+    elif a = 155 then b := 301
+    elif a = 156 then b := 302
+    elif a = 157 then b := 303
+    elif a = 158 then b := 336
+    elif a = 159 then b := 337
+    elif a = 160 then b := 338
+    elif a = 161 then b := 339
+    elif a = 162 then b := 340
+    elif a = 163 then b := 341
+    elif a = 164 then b := 342
+    elif a = 165 then b := 343
+    elif a = 166 then b := 344
+    elif a = 167 then b := 345
+    elif a = 168 then b := 346
+    elif a = 169 then b := 347
+    elif a = 170 then b := 348
+    elif a = 171 then b := 349
+    elif a = 172 then b := 350
+    elif a = 173 then b := 351
+    elif a = 174 then b := 352
+    elif a = 175 then b := 353
+    elif a = 176 then b := 354
+    elif a = 177 then b := 355
+    elif a = 178 then b := 356
+    elif a = 179 then b := 357
+    elif a = 180 then b := 358
+    elif a = 181 then b := 359
+    elif a = 182 then b := 360
+    elif a = 183 then b := 361
+    elif a = 184 then b := 362
+    elif a = 185 then b := 363
+    elif a = 186 then b := 364
+    elif a = 187 then b := 365
+    elif a = 188 then b := 366
+    elif a = 189 then b := 367
+    end-if
+    returned:= b
+  end-function
+
+  function random_non_gov(a: integer): integer
+    if a = 1 then b := 11
+    elif a = 2 then b := 12
+    elif a = 3 then b := 13
+    elif a = 4 then b := 14
+    elif a = 5 then b := 15
+    elif a = 6 then b := 16
+    elif a = 7 then b := 17
+    elif a = 8 then b := 18
+    elif a = 9 then b := 19
+    elif a = 10 then b := 20
+    elif a = 11 then b := 34
+    elif a = 12 then b := 35
+    elif a = 13 then b := 36
+    elif a = 14 then b := 37
+    elif a = 15 then b := 38
+    elif a = 16 then b := 39
+    elif a = 17 then b := 40
+    elif a = 18 then b := 41
+    elif a = 19 then b := 42
+    elif a = 20 then b := 43
+    elif a = 21 then b := 44
+    elif a = 22 then b := 45
+    elif a = 23 then b := 46
+    elif a = 24 then b := 47
+    elif a = 25 then b := 48
+    elif a = 26 then b := 49
+    elif a = 27 then b := 66
+    elif a = 28 then b := 67
+    elif a = 29 then b := 68
+    elif a = 30 then b := 69
+    elif a = 31 then b := 70
+    elif a = 32 then b := 71
+    elif a = 33 then b := 72
+    elif a = 34 then b := 73
+    elif a = 35 then b := 74
+    elif a = 36 then b := 75
+    elif a = 37 then b := 76
+    elif a = 38 then b := 77
+    elif a = 39 then b := 78
+    elif a = 40 then b := 79
+    elif a = 41 then b := 80
+    elif a = 42 then b := 81
+    elif a = 43 then b := 82
+    elif a = 44 then b := 83
+    elif a = 45 then b := 84
+    elif a = 46 then b := 103
+    elif a = 47 then b := 104
+    elif a = 48 then b := 105
+    elif a = 49 then b := 106
+    elif a = 50 then b := 107
+    elif a = 51 then b := 108
+    elif a = 52 then b := 109
+    elif a = 53 then b := 110
+    elif a = 54 then b := 111
+    elif a = 55 then b := 112
+    elif a = 56 then b := 113
+    elif a = 57 then b := 114
+    elif a = 58 then b := 115
+    elif a = 59 then b := 116
+    elif a = 60 then b := 117
+    elif a = 61 then b := 118
+    elif a = 62 then b := 119
+    elif a = 63 then b := 120
+    elif a = 64 then b := 121
+    elif a = 65 then b := 122
+    elif a = 66 then b := 123
+    elif a = 67 then b := 145
+    elif a = 68 then b := 146
+    elif a = 69 then b := 147
+    elif a = 70 then b := 148
+    elif a = 71 then b := 149
+    elif a = 72 then b := 150
+    elif a = 73 then b := 151
+    elif a = 74 then b := 152
+    elif a = 75 then b := 153
+    elif a = 76 then b := 154
+    elif a = 77 then b := 155
+    elif a = 78 then b := 156
+    elif a = 79 then b := 157
+    elif a = 80 then b := 158
+    elif a = 81 then b := 159
+    elif a = 82 then b := 160
+    elif a = 83 then b := 161
+    elif a = 84 then b := 162
+    elif a = 85 then b := 163
+    elif a = 86 then b := 164
+    elif a = 87 then b := 165
+    elif a = 88 then b := 166
+    elif a = 89 then b := 167
+    elif a = 90 then b := 168
+    elif a = 91 then b := 193
+    elif a = 92 then b := 194
+    elif a = 93 then b := 195
+    elif a = 94 then b := 196
+    elif a = 95 then b := 197
+    elif a = 96 then b := 198
+    elif a = 97 then b := 199
+    elif a = 98 then b := 200
+    elif a = 99 then b := 201
+    elif a = 100 then b := 202
+    elif a = 101 then b := 203
+    elif a = 102 then b := 204
+    elif a = 103 then b := 205
+    elif a = 104 then b := 206
+    elif a = 105 then b := 207
+    elif a = 106 then b := 208
+    elif a = 107 then b := 209
+    elif a = 108 then b := 210
+    elif a = 109 then b := 211
+    elif a = 110 then b := 212
+    elif a = 111 then b := 213
+    elif a = 112 then b := 214
+    elif a = 113 then b := 215
+    elif a = 114 then b := 216
+    elif a = 115 then b := 217
+    elif a = 116 then b := 218
+    elif a = 117 then b := 219
+    elif a = 118 then b := 246
+    elif a = 119 then b := 247
+    elif a = 120 then b := 248
+    elif a = 121 then b := 249
+    elif a = 122 then b := 250
+    elif a = 123 then b := 251
+    elif a = 124 then b := 252
+    elif a = 125 then b := 253
+    elif a = 126 then b := 254
+    elif a = 127 then b := 255
+    elif a = 128 then b := 256
+    elif a = 129 then b := 257
+    elif a = 130 then b := 258
+    elif a = 131 then b := 259
+    elif a = 132 then b := 260
+    elif a = 133 then b := 261
+    elif a = 134 then b := 262
+    elif a = 135 then b := 263
+    elif a = 136 then b := 264
+    elif a = 137 then b := 265
+    elif a = 138 then b := 266
+    elif a = 139 then b := 267
+    elif a = 140 then b := 268
+    elif a = 141 then b := 269
+    elif a = 142 then b := 270
+    elif a = 143 then b := 271
+    elif a = 144 then b := 272
+    elif a = 145 then b := 273
+    elif a = 146 then b := 274
+    elif a = 147 then b := 304
+    elif a = 148 then b := 305
+    elif a = 149 then b := 306
+    elif a = 150 then b := 307
+    elif a = 151 then b := 308
+    elif a = 152 then b := 309
+    elif a = 153 then b := 310
+    elif a = 154 then b := 311
+    elif a = 155 then b := 312
+    elif a = 156 then b := 313
+    elif a = 157 then b := 314
+    elif a = 158 then b := 315
+    elif a = 159 then b := 316
+    elif a = 160 then b := 317
+    elif a = 161 then b := 318
+    elif a = 162 then b := 319
+    elif a = 163 then b := 320
+    elif a = 164 then b := 321
+    elif a = 165 then b := 322
+    elif a = 166 then b := 323
+    elif a = 167 then b := 324
+    elif a = 168 then b := 325
+    elif a = 169 then b := 326
+    elif a = 170 then b := 327
+    elif a = 171 then b := 328
+    elif a = 172 then b := 329
+    elif a = 173 then b := 330
+    elif a = 174 then b := 331
+    elif a = 175 then b := 332
+    elif a = 176 then b := 333
+    elif a = 177 then b := 334
+    elif a = 178 then b := 335
+    elif a = 179 then b := 368
+    elif a = 180 then b := 369
+    elif a = 181 then b := 370
+    elif a = 182 then b := 371
+    elif a = 183 then b := 372
+    elif a = 184 then b := 373
+    elif a = 185 then b := 374
+    elif a = 186 then b := 375
+    elif a = 187 then b := 376
+    elif a = 188 then b := 377
+    elif a = 189 then b := 378
+    elif a = 190 then b := 379
+    elif a = 191 then b := 380
+    elif a = 192 then b := 381
+    elif a = 193 then b := 382
+    elif a = 194 then b := 383
+    elif a = 195 then b := 384
+    elif a = 196 then b := 385
+    elif a = 197 then b := 386
+    elif a = 198 then b := 387
+    elif a = 199 then b := 388
+    elif a = 200 then b := 389
+    elif a = 201 then b := 390
+    elif a = 202 then b := 391
+    elif a = 203 then b := 392
+    elif a = 204 then b := 393
+    elif a = 205 then b := 394
+    elif a = 206 then b := 395
+    elif a = 207 then b := 396
+    elif a = 208 then b := 397
+    elif a = 209 then b := 398
+    elif a = 210 then b := 399
+    elif a = 211 then b := 400
+    elif a = 212 then b := 401
+    elif a = 213 then b := 402
+    end-if
+    returned := b
+  end-function
+
+  function left_seat_calc(a: integer): integer
+    if a = 49 then b := 23
+    elif a = 84 then b := 39
+    elif a = 102 then b := 57
+    elif a = 123 then b := 57
+    elif a = 144 then b := 78
+    elif a = 168 then b := 78
+    elif a = 192 then b := 102
+    elif a = 219 then b := 102
+    elif a = 274 then b := 128
+    elif a = 335 then b := 157
+    elif a = 402 then b := 189
+    end-if
+    returned := b
+  end-function
+
+  function right_seat_calc(a: integer): integer
+    if a = 49 then b := 26
+    elif a = 84 then b := 45
+    elif a = 102 then b := 45
+    elif a = 123 then b := 63
+    elif a = 144 then b := 63
+    elif a = 168 then b := 90
+    elif a = 192 then b := 90
+    elif a = 219 then b := 117
+    elif a = 274 then b := 146
+    elif a = 335 then b := 178
+    elif a = 402 then b := 213
+    end-if
+    returned := b
+  end-function
+
+! ============================================================================
+! End model
+! ============================================================================
+
+end-model

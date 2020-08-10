@@ -1,0 +1,160 @@
+model "Dail Eireann Model"
+  uses "mmxprs", "mmsystem"
+
+! ============================================================================
+! Set Parameters and Datafile
+! ============================================================================
+
+  max_runtime_mins := 60
+
+  !filename := "dail_49.dat"
+
+! ============================================================================
+! Read in Data
+! ============================================================================
+
+  ! Data for Set Creation
+  declarations
+    number_of_parliament_seats: integer
+  end-declarations
+
+  initialisations from filename
+    number_of_parliament_seats
+  end-initialisations
+
+  ! Fixed Data
+  declarations
+    Seats = 1..number_of_parliament_seats
+    Parties: set of string
+    number_of_members_per_party: array(Parties) of integer
+    column: array(Seats) of integer
+    row: array(Seats) of integer
+    gov_party: array(Parties) of integer
+    taoiseach_party: array(Parties) of integer
+    loto_party: array(Parties) of integer
+    number_of_ministries: array(Parties) of integer
+    seat_distances: array(Seats, Seats) of real
+    comm_flows: array(Seats, Seats) of real
+    binary_adjacency: array(Seats, Seats) of real
+    number_of_independents: integer
+  end-declarations
+
+  initialisations from filename
+    Parties
+    number_of_members_per_party
+    column
+    row
+    gov_party
+    taoiseach_party
+    loto_party
+    number_of_ministries
+    seat_distances
+    comm_flows
+    binary_adjacency
+    number_of_independents
+  end-initialisations
+
+  ! Decision Variables
+  declarations
+    ! 'Party Seat?' binary variable for each seat for each party
+    z: array(Seats, Parties) of mpvar
+    ! 'Seat 1 in Party and Seat 2 Not and both seats adjacent' continuous variable for each pair of seats for each party
+    u: array(Seats, Seats, Parties) of mpvar
+  end-declarations
+
+! ============================================================================
+! Modelling
+! ============================================================================
+
+  ! ----------------------------------------------------------------------------
+  ! Pre-Op Procedures
+  ! ----------------------------------------------------------------------------
+
+  ! Set Max Runtime
+  setparam("xprs_maxtime", (max_runtime_mins * 60))
+
+  ! Capture System Time
+  time_one := time(SYS_NOW)
+
+  ! ----------------------------------------------------------------------------
+  ! Objective Function
+  ! ----------------------------------------------------------------------------
+
+  number_of_partitions := sum(i,k in Seats | i < k, j in Parties) binary_adjacency(i,k) * u(i,k,j)
+
+  ! ----------------------------------------------------------------------------
+  ! Model Constraints
+  ! ----------------------------------------------------------------------------
+
+  ! 1. Each seat is assigned to, at most, one party.
+  forall(i in Seats) sum(j in Parties) z(i,j) <= 1
+
+  ! 2. Each party must be allocated exactly the required number of seats for its parliamentary members.
+  forall(j in Parties) sum(i in Seats) z(i,j) = number_of_members_per_party(j)
+
+  ! 3. The u variable is set to 1 when the appropriate z variables are 1 and 0.
+  forall(i,k in Seats | i < k, j in Parties) z(i,j) + (1 - z(k,j)) <= u(i,k,j) + 1
+
+  ! 4. The z variable must be explicitly binary
+  forall(i in Seats, j in Parties) z(i,j) is_binary
+
+  ! ----------------------------------------------------------------------------
+  ! Dail-specific Constraints
+  ! ----------------------------------------------------------------------------
+
+  ! 5. TAOI: Taoiseach's seat must be assigned to largest government party
+  forall(i in Seats | i = 21, j in Parties | taoiseach_party(j) >= 1) z(i,j) = 1
+  ! 6. LOTO: LOTO's seat must be assigned to largest non-government party
+  forall(i in Seats | i = 46, j in Parties | loto_party(j) >= 1) z(i,j) = 1
+
+  ! 7. GOV: Government parties must be to the left of non-government parties
+  forall(a,b in Seats) sum(c in Parties | gov_party(c) >= 1) z(a,c) * column(a) <= sum(d in Parties | gov_party(d) <= 0) z(b,d) * column(b) + (1 - sum(d in Parties | gov_party(d) <= 0) z(b,d)) * 46
+
+  ! 8. MIN: A party must have enough seats in the front 2 rows to seat its ministers)
+  forall(j in Parties) sum(i in Seats | row(i) <= 2) z(i,j) >= number_of_ministries(j)
+
+  ! 9. IND: There must be enough seats to the right of the government to seat independents
+  sum(i in Seats | column(i) >= 23) (1 - sum(j in Parties) z(i,j)) >= number_of_independents
+
+  ! ----------------------------------------------------------------------------
+  ! Optimize
+  ! ----------------------------------------------------------------------------
+
+  minimise(number_of_partitions)
+
+  ! ----------------------------------------------------------------------------
+  ! Post-Op Procedures
+  ! ----------------------------------------------------------------------------
+
+  ! Capture System Time
+  time_two := time(SYS_NOW)
+
+! ============================================================================
+! Print/Save the results
+! ============================================================================
+
+  procedure print_solution
+
+    !fopen(("Results_PC"), F_OUTPUT)
+
+    writeln
+
+    writeln("Total Communication Distance: ", getobjval)
+
+    writeln
+
+    writeln("Time Taken: ", time_two - time_one, "ms")
+
+    writeln
+
+    !fclose(F_OUTPUT)
+
+  end-procedure
+
+  print_solution
+
+! ============================================================================
+! End model
+! ============================================================================
+
+end-model

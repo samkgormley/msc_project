@@ -1,0 +1,206 @@
+model "Dail Eireann Model"
+  uses "mmxprs", "mmsystem"
+
+! ============================================================================
+! Set Parameters and Datafile
+! ============================================================================
+
+  max_runtime_mins := 60
+
+  !filename := "dail_49.dat"
+  !filename := "dail_84.dat"
+  !filename := "dail_123.dat"
+  !filename := "dail_219.dat"
+  !filename := "dail_274.dat"
+  !filename := "dail_335.dat"
+  !filename := "dail_402.dat"
+
+  !filename := "33_dail.dat"
+  !filename := "32_dail.dat"
+  !filename := "31_dail.dat"
+  !filename := "30_dail.dat"
+  !filename := "29_dail.dat"
+  !filename := "28_dail.dat"
+
+! ============================================================================
+! Read in Data
+! ============================================================================
+
+  ! Data for Set Creation
+  declarations
+    number_of_parliament_seats: integer
+  end-declarations
+
+  initialisations from filename
+    number_of_parliament_seats
+  end-initialisations
+
+  ! Fixed Data
+  declarations
+    Seats = 1..number_of_parliament_seats
+    Parties: set of string
+    number_of_members_per_party: array(Parties) of integer
+    column: array(Seats) of integer
+    row: array(Seats) of integer
+    gov_party: array(Parties) of integer
+    taoiseach_party: array(Parties) of integer
+    loto_party: array(Parties) of integer
+    number_of_ministries: array(Parties) of integer
+    seat_distances: array(Seats, Seats) of real
+    comm_flows: array(Seats, Seats) of real
+    number_of_independents: integer
+  end-declarations
+
+  initialisations from filename
+    Parties
+    number_of_members_per_party
+    column
+    row
+    gov_party
+    taoiseach_party
+    loto_party
+    number_of_ministries
+    seat_distances
+    comm_flows
+    number_of_independents
+  end-initialisations
+  
+  ! Define opp_party values
+  forall(j in Parties | j <> "Independents") opp_party(j) := 1 - gov_party(j)
+
+  ! Decision Variables
+  declarations
+    ! 'Central Seat?' binary variable for each seat for each party
+    y: array(Parties, Seats) of mpvar
+    ! 'Assigned to Centre?' binary variable for each pair of seats
+    x: array(Seats, Seats) of mpvar
+  end-declarations
+
+! ============================================================================
+! Modelling
+! ============================================================================
+
+  ! ----------------------------------------------------------------------------
+  ! Pre-Op Procedures
+  ! ----------------------------------------------------------------------------
+
+  ! Set Max Runtime
+  setparam("xprs_maxtime", (max_runtime_mins * 60))
+
+  ! Capture System Time
+  time_one := time(SYS_NOW)
+
+  ! ----------------------------------------------------------------------------
+  ! Objective Function
+  ! ----------------------------------------------------------------------------
+
+  total_distance_to_centres := sum(i,k in Seats) seat_distances(i,k) * x(i,k)
+
+  ! ----------------------------------------------------------------------------
+  ! Model Constraints
+  ! ----------------------------------------------------------------------------
+
+  ! 1. Each seat is assigned to, at most, one central seat.
+  forall(i in Seats) sum(k in Seats) x(i,k) <= 1
+
+  ! 2. If seat k is the central seat for party j, then K(j) seats are allocated to it.
+  !    If seat k is not a central seat, then no seats are allocated to it.
+  forall(k in Seats) sum(i in Seats) x(i,k) = sum(j in Parties) number_of_members_per_party(j) * y(j,k)
+
+  ! 3. Each seat can be a central seat for at most one party.
+  forall(k in Seats) sum(j in Parties) y(j,k) <= 1
+
+  ! 4. Exactly one central seat should be chosen for each party.
+  forall(j in Parties) sum(k in Seats) y(j,k) = 1
+
+  ! 5. The x variables are binary.
+  forall(i,k in Seats) x(i,k) is_binary
+
+  ! 6. The y variables are binary
+  forall(j in Parties, k in Seats) y(j,k) is_binary
+
+  ! ----------------------------------------------------------------------------
+  ! Dail-specific Constraints
+  ! ----------------------------------------------------------------------------
+
+  ! 7. TAOI: Taoiseach's seat must be assigned to largest government party
+  forall(i,k in Seats | i = 21, j in Parties | taoiseach_party(j) >= 1) x(i,k) = y(j,k)
+  ! 8. LOTO: LOTO's seat must be assigned to largest non-government party
+  forall(i,k in Seats | i = 46, j in Parties | loto_party(j) >= 1) x(i,k) = y(j,k)
+
+  ! 9. GOV: Government parties must be to the left of non-government parties
+  forall(a in Parties | gov_party(a) >= 1, b in Parties | opp_party(b) >= 1) sum(k in Seats) y(a,k) * column(k) <= sum(k in Seats) y(b,k) * column(k)
+
+  ! 10. MIN: A party must have enough seats in the front 2 rows to seat its ministers)
+  forall(j in Parties, k in Seats) sum(i in Seats | row(i) <= 2) x(i,k) >= y(j,k) * number_of_ministries(j)
+
+  ! 11. IND: There must be enough unallocated seats on the right side of the chamber in the backmost two rows to seat the independent TDs.
+  sum(i in Seats | column(i) >= 23 and row(i) >= 4) (1 - sum(k in Seats) x(i,k)) >= number_of_independents
+
+  ! ----------------------------------------------------------------------------
+  ! Optimize
+  ! ----------------------------------------------------------------------------
+
+  minimise(total_distance_to_centres)
+
+  ! ----------------------------------------------------------------------------
+  ! Post-Op Procedures
+  ! ----------------------------------------------------------------------------
+
+  ! Capture System Time
+  time_two := time(SYS_NOW)
+  
+  ! Extract z(i,j) variable
+  forall(i,k in Seats, j in Parties) do
+    if (getsol(x(i,k)) + getsol(y(j,k))) > 1.1 then
+      z(i,j) := 1
+    end-if
+  end-do
+
+  ! ----------------------------------------------------------------------------
+  ! Post-Op: Add Independents
+  ! ----------------------------------------------------------------------------
+
+  n := 1
+  while(n <= number_of_independents) do
+    n += 1
+    max_seat := 1
+    forall(i in Seats | sum(h in Parties) z(i,h) = 0 and column(i) >= 23) do
+      if i > max_seat then
+        max_seat := i
+      end-if
+    end-do
+    if max_seat <> 1 then
+      z(max_seat,"Unaligned Independents") := 1
+    end-if
+  end-do
+
+! ============================================================================
+! Print/Save the results
+! ============================================================================
+
+  procedure print_solution
+
+    !fopen(("Results_PC"), F_OUTPUT)
+
+    writeln
+
+    writeln("Total Distance to centres: ", getobjval)
+
+    writeln
+
+    writeln("Time Taken: ", time_two - time_one, "ms")
+
+    writeln
+
+    !fclose(F_OUTPUT)
+
+  end-procedure
+
+  print_solution
+
+! ============================================================================
+! End model
+! ============================================================================
+
+end-model
