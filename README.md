@@ -1,1 +1,3 @@
 # msc_project
+
+This repository contains all data and modelling files used for the generation of...
