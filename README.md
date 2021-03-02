@@ -2,3 +2,5 @@
 
 ## Abstract
 
+## Data
+The data folder contains two subfolders: generated, which contains .... and historical, which contains ...
